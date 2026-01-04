@@ -8,6 +8,216 @@ import os
 from pathlib import Path
 
 # =========================
+# Custom Model Classes
+# =========================
+class SoftmaxRegression:
+    """Custom Softmax Regression implementation"""
+    def __init__(self, learning_rate=0.01, epochs=1000, n_classes=2, random_state=42):
+        self.learning_rate = learning_rate
+        self.epochs = epochs
+        self.n_classes = n_classes
+        self.weights = None
+        self.bias = None
+        np.random.seed(random_state)
+
+    def _initialize_parameters(self, n_features):
+        self.weights = np.random.randn(n_features, self.n_classes) * 0.01
+        self.bias = np.zeros((1, self.n_classes))
+
+    def _softmax(self, z):
+        exp_z = np.exp(z - np.max(z, axis=1, keepdims=True))
+        return exp_z / np.sum(exp_z, axis=1, keepdims=True)
+
+    def _one_hot_encode(self, y):
+        one_hot = np.zeros((len(y), self.n_classes))
+        one_hot[np.arange(len(y)), y] = 1
+        return one_hot
+
+    def fit(self, X, y):
+        n_samples, n_features = X.shape
+        self._initialize_parameters(n_features)
+        y_encoded = self._one_hot_encode(y)
+
+        for i in range(self.epochs):
+            linear_model = np.dot(X, self.weights) + self.bias
+            y_pred = self._softmax(linear_model)
+
+            dw = (1 / n_samples) * np.dot(X.T, (y_pred - y_encoded))
+            db = (1 / n_samples) * np.sum(y_pred - y_encoded, axis=0, keepdims=True)
+
+            self.weights -= self.learning_rate * dw
+            self.bias -= self.learning_rate * db
+
+    def predict_proba(self, X):
+        linear_model = np.dot(X, self.weights) + self.bias
+        return self._softmax(linear_model)
+
+    def predict(self, X):
+        y_proba = self.predict_proba(X)
+        return np.argmax(y_proba, axis=1)
+
+class ManualGaussianNB:
+    """Custom Naive Bayes implementation"""
+    def __init__(self, var_smoothing=1e-9):
+        self.var_smoothing = var_smoothing
+        self.classes = None
+        self.mean = None
+        self.var = None
+        self.priors = None
+
+    def fit(self, X, y):
+        self.classes = np.unique(y)
+        n_features = X.shape[1]
+
+        self.mean = np.zeros((len(self.classes), n_features))
+        self.var = np.zeros((len(self.classes), n_features))
+        self.priors = np.zeros(len(self.classes))
+
+        for i, c in enumerate(self.classes):
+            X_c = X[y == c]
+            self.mean[i, :] = X_c.mean(axis=0)
+            self.var[i, :] = X_c.var(axis=0) + self.var_smoothing
+            self.priors[i] = X_c.shape[0] / float(len(X))
+
+    def _calculate_likelihood(self, class_idx, X):
+        mean = self.mean[class_idx]
+        var = self.var[class_idx]
+        numerator = np.exp(-(X - mean)**2 / (2 * var))
+        denominator = np.sqrt(2 * np.pi * var)
+        return numerator / denominator
+
+    def predict(self, X):
+        posteriors = []
+        for i, c in enumerate(self.classes):
+            prior = np.log(self.priors[i])
+            likelihoods = np.log(self._calculate_likelihood(i, X) + 1e-15)
+            posterior = prior + np.sum(likelihoods, axis=1)
+            posteriors.append(posterior)
+        return self.classes[np.argmax(np.array(posteriors), axis=0)]
+    
+    def predict_proba(self, X):
+        """Add predict_proba for compatibility with stacking"""
+        posteriors = []
+        for i, c in enumerate(self.classes):
+            prior = np.log(self.priors[i])
+            likelihoods = np.log(self._calculate_likelihood(i, X) + 1e-15)
+            posterior = prior + np.sum(likelihoods, axis=1)
+            posteriors.append(posterior)
+        
+        posteriors = np.array(posteriors).T
+        # Convert log posteriors to probabilities
+        exp_posteriors = np.exp(posteriors - np.max(posteriors, axis=1, keepdims=True))
+        proba = exp_posteriors / np.sum(exp_posteriors, axis=1, keepdims=True)
+        
+        # Ensure always returns 2 columns for binary classification
+        if proba.shape[1] == 1:
+            # If only one class, create second column with zeros
+            proba = np.hstack([1 - proba, proba])
+        
+        return proba
+
+class Node:
+    """Node for Decision Tree"""
+    def __init__(self, feature=None, threshold=None, left=None, right=None, value=None):
+        self.feature = feature
+        self.threshold = threshold
+        self.left = left
+        self.right = right
+        self.value = value
+    
+    def is_leaf_node(self):
+        return self.value is not None
+
+class DecisionTreeClassifier:
+    """Custom Decision Tree implementation"""
+    def __init__(self, min_samples_split=2, max_depth=100):
+        self.min_samples_split = min_samples_split
+        self.max_depth = max_depth
+        self.root = None
+
+    def fit(self, X, y):
+        self.root = self.grow_tree(X, y)
+
+    def grow_tree(self, X, y, depth=0):
+        n_samples, n_features = X.shape
+        n_labels = len(set(y))
+
+        if (n_labels == 1 or depth >= self.max_depth or n_samples < self.min_samples_split):
+            leaf_value = self.most_common_label(y)
+            return Node(feature=None, threshold=None, left=None, right=None, value=leaf_value)
+
+        best_feature, best_threshold = self.best_split(X, y, n_features)
+        left_idx = (X[:, best_feature] <= best_threshold)
+        right_idx = (X[:, best_feature] > best_threshold)
+
+        left = self.grow_tree(X[left_idx], y[left_idx], depth + 1)
+        right = self.grow_tree(X[right_idx], y[right_idx], depth + 1)
+
+        return Node(feature=best_feature, threshold=best_threshold, left=left, right=right)
+
+    def best_split(self, X, y, n_features):
+        best_feature, best_threshold = None, None
+        best_gain = -1
+
+        for feat in range(n_features):
+            thresholds = np.unique(X[:, feat])
+            for thres in thresholds:
+                left = X[:, feat] <= thres
+                right = X[:, feat] > thres
+                if (len(y[left]) == 0 or len(y[right]) == 0):
+                    continue
+                gain = self.gini_gain(y, y[left], y[right])
+                if best_gain < gain:
+                    best_gain = gain
+                    best_feature = feat
+                    best_threshold = thres
+        return best_feature, best_threshold
+
+    def gini(self, y):
+        classes = np.unique(y)
+        imp = 1.0
+        for c in classes:
+            p = np.sum(y == c) / len(y)
+            imp -= p**2
+        return imp
+
+    def gini_gain(self, y, left, right):
+        n = len(y)
+        n_left = len(left)
+        n_right = len(right)
+        child = n_left / n * self.gini(left) + n_right / n * self.gini(right)
+        return self.gini(y) - child
+
+    def most_common_label(self, y):
+        return np.bincount(y).argmax()
+
+    def predict(self, X):
+        return np.array([self._traverse_tree(x, self.root) for x in X])
+
+    def _traverse_tree(self, x, node):
+        if node.value is not None:
+            return node.value
+        if x[node.feature] <= node.threshold:
+            return self._traverse_tree(x, node.left)
+        else:
+            return self._traverse_tree(x, node.right)
+    
+    def predict_proba(self, X):
+        """Add predict_proba for compatibility with stacking"""
+        predictions = self.predict(X)
+        n_samples = len(predictions)
+        # Always return probabilities for 2 classes (binary classification)
+        proba = np.zeros((n_samples, 2))
+        for i, pred in enumerate(predictions):
+            if int(pred) == 0:
+                proba[i, 0] = 1.0
+                proba[i, 1] = 0.0
+            else:
+                proba[i, 0] = 0.0
+                proba[i, 1] = 1.0
+        return proba
+
+# =========================
 # Page setup + better CSS
 # =========================
 st.set_page_config(page_title="❤️ Heart Disease Prediction", layout="wide", initial_sidebar_state="collapsed")
@@ -87,35 +297,58 @@ st.markdown(
 # =========================
 # Load Models
 # =========================
+# Load Models
+# =========================
 @st.cache_resource
 def load_models():
     """Load 5 models cho Stacking Ensemble"""
     try:
+        # Get absolute path to models directory
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        models_dir = os.path.join(base_dir, 'assets', 'models')
+        
+        st.info(f"🔍 Looking for models in: {models_dir}")
+        
         models_dict = {}
         model_files = {
-            'svm': 'assets/models/svm_model.joblib',
-            'softmax': 'assets/models/softmax_model.joblib',
-            'nb': 'assets/models/nb_model.joblib',
-            'dt': 'assets/models/dt_model.joblib',
-            'meta': 'assets/models/meta_logistic.joblib'
+            'svm': 'svm_rbf_model.joblib',
+            'softmax': 'softmax_model.joblib',
+            'nb': 'naivebayes_model.joblib',
+            'dt': 'decision_tree_model.joblib',
+            'meta': 'stacking_model.joblib'
         }
         
         missing_models = []
-        for name, filepath in model_files.items():
+        loaded_models = []
+        for name, filename in model_files.items():
+            filepath = os.path.join(models_dir, filename)
             if os.path.exists(filepath):
-                models_dict[name] = joblib.load(filepath)
+                try:
+                    models_dict[name] = joblib.load(filepath)
+                    loaded_models.append(f"✅ {filename}")
+                except Exception as load_error:
+                    missing_models.append(f"❌ {filename}: {str(load_error)}")
             else:
-                missing_models.append(filepath)
+                missing_models.append(f"❌ {filename}: File not found")
+        
+        # Show loading details
+        st.write("**Loading Status:**")
+        for msg in loaded_models:
+            st.write(msg)
+        for msg in missing_models:
+            st.write(msg)
         
         if missing_models:
-            st.warning(f"⚠️ Thiếu {len(missing_models)}/5 models: {missing_models}")
+            st.warning(f"⚠️ Failed to load {len(missing_models)}/5 models")
             return None
         
-        st.success("✅ Đã load 5 models thành công!")
+        st.success(f"✅ Successfully loaded all {len(models_dict)}/5 models!")
         return models_dict
     
     except Exception as e:
-        st.error(f"❌ Lỗi khi load models: {e}")
+        st.error(f"❌ Fatal error loading models: {e}")
+        import traceback
+        st.code(traceback.format_exc())
         return None
 
 # Load models
@@ -276,29 +509,70 @@ def predict_with_stacking(X_df: pd.DataFrame, models_dict: dict):
     Step 2: 4 probabilities → meta_logistic → final prediction
     """
     try:
+        # Convert DataFrame to numpy array for models that need it
+        X_array = X_df.values
+        
         # Step 1: Get probabilities from 4 base models
         base_probs = {}
-        base_probs['svm'] = models_dict['svm'].predict_proba(X_df)[0, 1]
-        base_probs['softmax'] = models_dict['softmax'].predict_proba(X_df)[0, 1]
-        base_probs['nb'] = models_dict['nb'].predict_proba(X_df)[0, 1]
-        base_probs['dt'] = models_dict['dt'].predict_proba(X_df)[0, 1]
         
-        # Step 2: Create meta features (4 probabilities)
-        meta_features = pd.DataFrame([[
-            base_probs['svm'],
-            base_probs['softmax'],
-            base_probs['nb'],
-            base_probs['dt']
-        ]], columns=['svm_prob', 'softmax_prob', 'nb_prob', 'dt_prob'])
+        # SVM
+        svm_proba = models_dict['svm'].predict_proba(X_array)
+        base_probs['svm'] = float(svm_proba[0, 1]) if svm_proba.shape[1] > 1 else float(svm_proba[0, 0])
+        
+        # Softmax
+        softmax_proba = models_dict['softmax'].predict_proba(X_array)
+        base_probs['softmax'] = float(softmax_proba[0, 1]) if softmax_proba.shape[1] > 1 else float(softmax_proba[0, 0])
+        
+        # Naive Bayes
+        nb_proba = models_dict['nb'].predict_proba(X_array)
+        base_probs['nb'] = float(nb_proba[0, 1]) if nb_proba.shape[1] > 1 else float(nb_proba[0, 0])
+        
+        # Decision Tree
+        dt_proba = models_dict['dt'].predict_proba(X_array)
+        base_probs['dt'] = float(dt_proba[0, 1]) if dt_proba.shape[1] > 1 else float(dt_proba[0, 0])
+        
+        # Step 2: Create meta features (4 probabilities) - MUST MATCH TRAINING ORDER
+        # Training order from CSV: svm_pred, nb_pred, dt_pred, softmax_pred
+        meta_features = np.array([
+            base_probs['svm'],       # Column 1: svm_pred
+            base_probs['nb'],        # Column 2: nb_pred
+            base_probs['dt'],        # Column 3: dt_pred
+            base_probs['softmax']    # Column 4: softmax_pred
+        ]).reshape(1, -1)
         
         # Step 3: Meta-learner prediction
-        final_proba = models_dict['meta'].predict_proba(meta_features)[0, 1]
-        final_pred = 1 if final_proba >= 0.5 else 0
+        meta_model = models_dict['meta']
+        
+        if isinstance(meta_model, dict) and 'weights' in meta_model:
+            # Manual logistic regression with saved weights
+            weights = np.array(meta_model['weights'])
+            threshold = meta_model.get('threshold', 0.5)
+            
+            # Check if weights include bias (5 elements: 4 features + 1 bias)
+            if len(weights) == 5:
+                # Last element is bias
+                w = weights[:-1].reshape(-1, 1)
+                bias = weights[-1]
+                z = np.dot(meta_features, w)[0, 0] + bias
+            else:
+                # No bias term
+                z = np.dot(meta_features, weights.reshape(-1, 1))[0, 0]
+            
+            # Sigmoid: p = 1 / (1 + exp(-z))
+            final_proba = 1.0 / (1.0 + np.exp(-z))
+            final_pred = 1 if final_proba >= threshold else 0
+        else:
+            # Standard sklearn model
+            meta_proba = meta_model.predict_proba(meta_features)
+            final_proba = float(meta_proba[0, 1]) if meta_proba.shape[1] > 1 else float(meta_proba[0, 0])
+            final_pred = 1 if final_proba >= 0.5 else 0
         
         return final_pred, final_proba, base_probs
     
     except Exception as e:
         st.error(f"❌ Lỗi khi dự đoán: {e}")
+        import traceback
+        st.code(traceback.format_exc())
         return None, None, None
 
 def metric_table(metrics_dict: dict) -> pd.DataFrame:
@@ -575,28 +849,105 @@ with tab1:
             pred, proba, base_probs = predict_with_stacking(X_df, models)
             
             if pred is not None:
-                # Display final result
+                # Display final result with large styling
                 if pred == 1:
-                    st.error(f"⚠️ **FINAL RESULT: HIGH RISK** | Probability: {proba:.2%}")
+                    st.markdown(f"""
+                    <div style="background: linear-gradient(135deg, #ff6b6b 0%, #ee5a6f 100%); 
+                                padding: 30px; border-radius: 15px; text-align: center; margin: 20px 0;">
+                        <h1 style="color: white; margin: 0; font-size: 2.5rem;">⚠️ HIGH RISK</h1>
+                        <h2 style="color: white; margin: 10px 0 0 0; font-size: 2rem;">
+                            Probability: {proba:.2%}
+                        </h2>
+                    </div>
+                    """, unsafe_allow_html=True)
                 else:
-                    st.success(f"✅ **FINAL RESULT: LOW RISK** | Probability: {(1-proba):.2%}")
+                    st.markdown(f"""
+                    <div style="background: linear-gradient(135deg, #51cf66 0%, #37b24d 100%); 
+                                padding: 30px; border-radius: 15px; text-align: center; margin: 20px 0;">
+                        <h1 style="color: white; margin: 0; font-size: 2.5rem;">✅ LOW RISK</h1>
+                        <h2 style="color: white; margin: 10px 0 0 0; font-size: 2rem;">
+                            Probability: {(1-proba):.2%}
+                        </h2>
+                    </div>
+                    """, unsafe_allow_html=True)
                 
-                # Display base model probabilities
+                # Display base model probabilities with predictions
                 st.markdown("---")
-                st.markdown("### 🔍 Base Model Probabilities (Stacking Level 1)")
+                st.markdown("### 🔍 Individual Model Predictions (Stacking Level 1)")
                 
                 base_col1, base_col2, base_col3, base_col4 = st.columns(4)
                 
+                # Thứ tự: SVM, Naive Bayes, Decision Tree, Softmax (theo thứ tự train)
                 with base_col1:
-                    st.metric("SVM", f"{base_probs['svm']:.2%}")
-                with base_col2:
-                    st.metric("Softmax", f"{base_probs['softmax']:.2%}")
-                with base_col3:
-                    st.metric("Naive Bayes", f"{base_probs['nb']:.2%}")
-                with base_col4:
-                    st.metric("Decision Tree", f"{base_probs['dt']:.2%}")
+                    svm_pred = "HIGH RISK" if base_probs['svm'] >= 0.5 else "LOW RISK"
+                    svm_color = "🔴" if base_probs['svm'] >= 0.5 else "🟢"
+                    st.markdown(f"""
+                    <div style="background: white; padding: 20px; border-radius: 10px; 
+                                border: 2px solid {'#ff6b6b' if base_probs['svm'] >= 0.5 else '#51cf66'}; 
+                                text-align: center;">
+                        <h3 style="margin: 0; font-size: 1.1rem;">SVM</h3>
+                        <h2 style="margin: 10px 0; font-size: 2rem; color: {'#ff6b6b' if base_probs['svm'] >= 0.5 else '#51cf66'};">
+                            {base_probs['svm']:.1%}
+                        </h2>
+                        <p style="margin: 0; font-size: 1rem; font-weight: 600;">
+                            {svm_color} {svm_pred}
+                        </p>
+                    </div>
+                    """, unsafe_allow_html=True)
                 
-                st.info("💡 These 4 probabilities are combined by Meta-Learner (Logistic Regression) to produce the final prediction.")
+                with base_col2:
+                    nb_pred = "HIGH RISK" if base_probs['nb'] >= 0.5 else "LOW RISK"
+                    nb_color = "🔴" if base_probs['nb'] >= 0.5 else "🟢"
+                    st.markdown(f"""
+                    <div style="background: white; padding: 20px; border-radius: 10px; 
+                                border: 2px solid {'#ff6b6b' if base_probs['nb'] >= 0.5 else '#51cf66'}; 
+                                text-align: center;">
+                        <h3 style="margin: 0; font-size: 1.1rem;">Naive Bayes</h3>
+                        <h2 style="margin: 10px 0; font-size: 2rem; color: {'#ff6b6b' if base_probs['nb'] >= 0.5 else '#51cf66'};">
+                            {base_probs['nb']:.1%}
+                        </h2>
+                        <p style="margin: 0; font-size: 1rem; font-weight: 600;">
+                            {nb_color} {nb_pred}
+                        </p>
+                    </div>
+                    """, unsafe_allow_html=True)
+                
+                with base_col3:
+                    dt_pred = "HIGH RISK" if base_probs['dt'] >= 0.5 else "LOW RISK"
+                    dt_color = "🔴" if base_probs['dt'] >= 0.5 else "🟢"
+                    st.markdown(f"""
+                    <div style="background: white; padding: 20px; border-radius: 10px; 
+                                border: 2px solid {'#ff6b6b' if base_probs['dt'] >= 0.5 else '#51cf66'}; 
+                                text-align: center;">
+                        <h3 style="margin: 0; font-size: 1.1rem;">Decision Tree</h3>
+                        <h2 style="margin: 10px 0; font-size: 2rem; color: {'#ff6b6b' if base_probs['dt'] >= 0.5 else '#51cf66'};">
+                            {base_probs['dt']:.1%}
+                        </h2>
+                        <p style="margin: 0; font-size: 1rem; font-weight: 600;">
+                            {dt_color} {dt_pred}
+                        </p>
+                    </div>
+                    """, unsafe_allow_html=True)
+                
+                with base_col4:
+                    softmax_pred = "HIGH RISK" if base_probs['softmax'] >= 0.5 else "LOW RISK"
+                    softmax_color = "🔴" if base_probs['softmax'] >= 0.5 else "🟢"
+                    st.markdown(f"""
+                    <div style="background: white; padding: 20px; border-radius: 10px; 
+                                border: 2px solid {'#ff6b6b' if base_probs['softmax'] >= 0.5 else '#51cf66'}; 
+                                text-align: center;">
+                        <h3 style="margin: 0; font-size: 1.1rem;">Softmax</h3>
+                        <h2 style="margin: 10px 0; font-size: 2rem; color: {'#ff6b6b' if base_probs['softmax'] >= 0.5 else '#51cf66'};">
+                            {base_probs['softmax']:.1%}
+                        </h2>
+                        <p style="margin: 0; font-size: 1rem; font-weight: 600;">
+                            {softmax_color} {softmax_pred}
+                        </p>
+                    </div>
+                    """, unsafe_allow_html=True)
+                
+                st.info("💡 These 4 predictions are combined by Meta-Learner (Logistic Regression) to produce the final result above.")
+
 
 
 
