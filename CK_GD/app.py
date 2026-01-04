@@ -3,6 +3,8 @@ import json
 import numpy as np
 import pandas as pd
 import streamlit as st
+import joblib
+import os
 from pathlib import Path
 
 # =========================
@@ -81,6 +83,43 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
+
+# =========================
+# Load Models
+# =========================
+@st.cache_resource
+def load_models():
+    """Load 5 models cho Stacking Ensemble"""
+    try:
+        models_dict = {}
+        model_files = {
+            'svm': 'assets/models/svm_model.joblib',
+            'softmax': 'assets/models/softmax_model.joblib',
+            'nb': 'assets/models/nb_model.joblib',
+            'dt': 'assets/models/dt_model.joblib',
+            'meta': 'assets/models/meta_logistic.joblib'
+        }
+        
+        missing_models = []
+        for name, filepath in model_files.items():
+            if os.path.exists(filepath):
+                models_dict[name] = joblib.load(filepath)
+            else:
+                missing_models.append(filepath)
+        
+        if missing_models:
+            st.warning(f"⚠️ Thiếu {len(missing_models)}/5 models: {missing_models}")
+            return None
+        
+        st.success("✅ Đã load 5 models thành công!")
+        return models_dict
+    
+    except Exception as e:
+        st.error(f"❌ Lỗi khi load models: {e}")
+        return None
+
+# Load models
+models = load_models()
 
 # =========================
 # Constants (processed schema)
@@ -230,10 +269,37 @@ def build_processed_row_from_state() -> pd.DataFrame:
 
     return pd.DataFrame([row], columns=FEATURE_COLS)
 
-def predict_placeholder(X_df: pd.DataFrame):
-    proba = float(np.clip(np.random.normal(loc=0.30, scale=0.15), 0, 1))
-    pred = 1 if proba >= 0.5 else 0
-    return pred, proba
+def predict_with_stacking(X_df: pd.DataFrame, models_dict: dict):
+    """
+    Stacking Ensemble Prediction:
+    Step 1: X_df (22 features) → 4 base models → 4 probabilities
+    Step 2: 4 probabilities → meta_logistic → final prediction
+    """
+    try:
+        # Step 1: Get probabilities from 4 base models
+        base_probs = {}
+        base_probs['svm'] = models_dict['svm'].predict_proba(X_df)[0, 1]
+        base_probs['softmax'] = models_dict['softmax'].predict_proba(X_df)[0, 1]
+        base_probs['nb'] = models_dict['nb'].predict_proba(X_df)[0, 1]
+        base_probs['dt'] = models_dict['dt'].predict_proba(X_df)[0, 1]
+        
+        # Step 2: Create meta features (4 probabilities)
+        meta_features = pd.DataFrame([[
+            base_probs['svm'],
+            base_probs['softmax'],
+            base_probs['nb'],
+            base_probs['dt']
+        ]], columns=['svm_prob', 'softmax_prob', 'nb_prob', 'dt_prob'])
+        
+        # Step 3: Meta-learner prediction
+        final_proba = models_dict['meta'].predict_proba(meta_features)[0, 1]
+        final_pred = 1 if final_proba >= 0.5 else 0
+        
+        return final_pred, final_proba, base_probs
+    
+    except Exception as e:
+        st.error(f"❌ Lỗi khi dự đoán: {e}")
+        return None, None, None
 
 def metric_table(metrics_dict: dict) -> pd.DataFrame:
     rows = []
@@ -497,14 +563,41 @@ with tab1:
             use_container_width=True,
         )
     with pred_col3:
-        st.info("Needs model file", icon="ℹ️")
+        if models:
+            st.success("Models OK", icon="✅")
+        else:
+            st.error("Missing models", icon="⚠️")
     
     if do_predict:
-        pred, proba = predict_placeholder(X_df)
-        if pred == 1:
-            st.error(f"⚠️ **RESULT: HIGH RISK** | Probability: {proba:.2%}")
+        if not models:
+            st.error("❌ Cannot predict: Models not loaded. Please ensure all 5 .joblib files are in assets/models/")
         else:
-            st.success(f"✅ **RESULT: LOW RISK** | Probability: {(1-proba):.2%}")
+            pred, proba, base_probs = predict_with_stacking(X_df, models)
+            
+            if pred is not None:
+                # Display final result
+                if pred == 1:
+                    st.error(f"⚠️ **FINAL RESULT: HIGH RISK** | Probability: {proba:.2%}")
+                else:
+                    st.success(f"✅ **FINAL RESULT: LOW RISK** | Probability: {(1-proba):.2%}")
+                
+                # Display base model probabilities
+                st.markdown("---")
+                st.markdown("### 🔍 Base Model Probabilities (Stacking Level 1)")
+                
+                base_col1, base_col2, base_col3, base_col4 = st.columns(4)
+                
+                with base_col1:
+                    st.metric("SVM", f"{base_probs['svm']:.2%}")
+                with base_col2:
+                    st.metric("Softmax", f"{base_probs['softmax']:.2%}")
+                with base_col3:
+                    st.metric("Naive Bayes", f"{base_probs['nb']:.2%}")
+                with base_col4:
+                    st.metric("Decision Tree", f"{base_probs['dt']:.2%}")
+                
+                st.info("💡 These 4 probabilities are combined by Meta-Learner (Logistic Regression) to produce the final prediction.")
+
 
 
 # =========================
